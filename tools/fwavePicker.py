@@ -1,4 +1,4 @@
-#encoding:utf-8
+#encoding:utf8
 """
 Author : Gaopengfei
 Date: 2017.3
@@ -30,9 +30,8 @@ import Tkinter
 import tkMessageBox
 
 curfilepath =  os.path.realpath(__file__)
-curfolderpath = os.path.dirname(curfilepath)
+current_folderpath = os.path.dirname(curfilepath)
 # my project components
-from QTdata.loadQTdata import QTloader
 
 
 
@@ -40,12 +39,51 @@ debugmod = True
 
 # ECG data from changgeng
 class ECGLoader(object):
-    def __init__(self):
+    def __init__(self, fs, current_folder_path):
         '''Loader for changgeng data.'''
-        pass
+        self.fs = fs
+
     def load(self, record_index):
         '''Return loaded signal info.'''
-        pass
+        return self.getSignal('fwave.json', record_index, 'II')
+
+    def getSize(self, jsonfilename):
+        '''Get fangchan record count.'''
+        import json
+        import codecs
+
+        matinfojson_filename = os.path.join(current_folderpath, 'changgeng', '%s' % jsonfilename)
+        with codecs.open(matinfojson_filename, 'r', 'utf8') as fin:
+            data = json.load(fin)
+
+        # mat_rhythm is the data
+        dlist = data['data']
+        return len(dlist)
+
+    def getSignal(self, jsonfilename, index, leadname):
+        '''Get fangchan signal.'''
+        import json
+        import codecs
+        import subprocess
+        import scipy.io as sio
+
+        matinfojson_filename = os.path.join(current_folderpath, 'changgeng', '%s' % jsonfilename)
+        with codecs.open(matinfojson_filename, 'r', 'utf8') as fin:
+            data = json.load(fin)
+
+        # mat_rhythm is the data
+        dlist = data['data']
+        matpath = dlist[index]['mat_rhythm']
+        diagnosis_text = dlist[index]['diagnose']
+
+        mat_file_name = os.path.split(matpath)[-1]
+        save_mat_filepath = os.path.join(current_folderpath, 'changgeng', 'data', mat_file_name)
+        if (os.path.exists(save_mat_filepath) == False):
+            subprocess.call(['scp', 'xinhe:%s' % matpath, save_mat_filepath])
+        matdata = sio.loadmat(save_mat_filepath)
+        raw_sig = np.squeeze(matdata[leadname])
+
+        return (raw_sig, diagnosis_text, mat_file_name)
 
 class whiteSamplePicker:
     def __init__(self):
@@ -86,20 +124,16 @@ class PointBrowser(object):
     def __init__(self, fig, ax, start_index):
         self.fig = fig
         self.ax = ax
-        self.SaveFolder = os.path.join(curfolderpath, 'results')
+        self.SaveFolder = os.path.join(current_folderpath, 'results')
 
 
         self.text = self.ax.text(0.05, 0.95, 'selected: none',
                             transform=self.ax.transAxes, va='top')
         # ============================
-        # QTdb
-        self.QTdb = QTloader()
-        self.reclist = self.QTdb.reclist
+        self.ecgloader = ECGLoader(500, current_folderpath)
         self.recInd = start_index
-        self.recname = self.reclist[self.recInd]
-        self.sigStruct = self.QTdb.load(self.recname)
-        self.rawSig = self.sigStruct['sig']
-        self.expLabels = self.QTdb.getexpertlabeltuple(self.recname)
+        self.reloadData()
+        # self.expLabels = self.QTdb.getexpertlabeltuple(self.diag_text)
 
         tableau20 = [(31, 119, 180), (174, 199, 232), (255, 127, 14), (255, 187, 120),    
              (44, 160, 44), (152, 223, 138), (214, 39, 40), (255, 152, 150),    
@@ -113,6 +147,20 @@ class PointBrowser(object):
         # Mark list
         self.poslist = []
         self.totalWhiteCount = 0
+
+    def reloadData(self):
+        '''Refresh data according to self.recInd'''
+        raw_sig, diag_text, mat_file_name = self.ecgloader.load(self.recInd)
+        self.diag_text = diag_text
+        self.mat_file_name = mat_file_name
+        self.rawSig = raw_sig
+
+        # Get QRS locations
+        from dpi.DPI_QRS_Detector import DPI_QRS_Detector as DPI
+        dpi = DPI()
+        print 'Testing QRS locations ...'
+        results = dpi.QRS_Detection(raw_sig, fs = self.ecgloader.fs)
+        self.expLabels = zip(results, ['R',] * len(results))
 
     def onpress(self, event):
         if event.key not in ('n', 'p',' ','x','a','d'):
@@ -149,15 +197,19 @@ class PointBrowser(object):
             pass
 
         self.update()
+
     def saveWhiteMarkList2Json(self):
-        with open(os.path.join(self.SaveFolder,'{}_poslist.json'.format(self.recname)),'w') as fout:
+        import codecs
+        with codecs.open(os.path.join(current_folderpath, 'changgeng', 'labeled-data', '%s.json' % (self.mat_file_name)), 'w', 'utf8') as fout:
             result_info = dict(
-                    ID = self.recname,
-                    database = 'QTdb',
+                    mat_file_name = self.mat_file_name,
+                    diag_text = self.diag_text,
+                    database = 'changgeng',
                     poslist = self.poslist,
-                    type = 'Tonset')
-            json.dump(result_info, fout, indent = 4, sort_keys = True)
-            print 'Json file for record {} saved.'.format(self.recname)
+                    expertLabels = self.expLabels,
+                    type = 'R')
+            json.dump(result_info, fout, indent = 4, sort_keys = True, ensure_ascii = False)
+            print 'Json file for record {} saved.'.format(self.mat_file_name)
 
     def clearWhiteMarkList(self):
         self.poslist = []
@@ -167,6 +219,7 @@ class PointBrowser(object):
     def addMarkx(self,x):
         # mark data
         pos = int(x)
+        pos = min(pos, len(self.rawSig) - 1)
         self.poslist.append(pos)
 
         self.ax.plot(pos, self.rawSig[pos],
@@ -194,11 +247,11 @@ class PointBrowser(object):
 
     def RepeatCheck(self):
         '''Check repeat results.'''
-        result_file_name = os.path.join(self.SaveFolder,'{}_poslist.json'.format(self.recname))
+        result_file_name = os.path.join(self.SaveFolder,'{}_poslist.json'.format(self.diag_text))
         if os.path.exists(result_file_name):
             window = Tkinter.Tk()
             window.wm_withdraw()
-            tkMessageBox.showinfo(title = 'Repeat', message = 'The record %s is already marked!' % self.recname)
+            tkMessageBox.showinfo(title = 'Repeat', message = 'The record %s is already marked!' % self.diag_text)
             window.destroy()
 
             # Go to next record
@@ -209,7 +262,7 @@ class PointBrowser(object):
         
     def reDraw(self):
 
-        self.RepeatCheck()
+        # self.RepeatCheck()
 
         ax = self.ax
         ax.cla()
@@ -221,7 +274,7 @@ class PointBrowser(object):
         # ====================================
         # load ECG signal
 
-        ax.set_title('QT {} (Index = {})'.format(self.recname,self.recInd))
+        ax.set_title(u'QT {} (Index = {})'.format(self.diag_text,self.recInd))
         ax.plot(self.rawSig, picker=5)  # 5 points tolerance
         # plot Expert Labels
         self.plotExpertLabels(ax)
@@ -250,12 +303,9 @@ class PointBrowser(object):
 
     def next_record(self):
         self.recInd += 1
-        if self.recInd >= len(self.reclist):
+        if self.recInd >= self.ecgloader.getSize('fwave.json'):
             return False
-        self.recname = self.reclist[self.recInd]
-        self.sigStruct = self.QTdb.load(self.recname)
-        self.rawSig = self.sigStruct['sig']
-        self.expLabels = self.QTdb.getexpertlabeltuple(self.recname)
+        self.reloadData()
         return True
 
     def plotExpertLabels(self,ax):
@@ -263,7 +313,7 @@ class PointBrowser(object):
         #get label Dict
         labelSet = set()
         labelDict = dict()
-        for pos,label in self.expLabels:
+        for pos, label in self.expLabels:
             if label in labelSet:
                 labelDict[label].append(pos)
             else:
