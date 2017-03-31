@@ -22,13 +22,17 @@ def get_configuration():
     conf['random_pattern_path'] = os.path.join(current_folderpath, "models/random_pattern.json")
     return conf
 
+
 def train_test(fs = 500):
     '''Train a fwave model.'''
     import codecs
+    import bisect
     from feature_extractor.feature_extractor import ECGfeatures
     from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
     ecg = ECGLoader(fs, current_folderpath)
     
+    # Max length of R-R interval
+    max_rr = 0
     training_data = list()
     labeled_records = glob.glob(os.path.join(current_folderpath, 'labeled-data', '*.json'))
 
@@ -44,9 +48,22 @@ def train_test(fs = 500):
         configuration_info = get_configuration()
         feature_extractor = ECGfeatures(rawsig, configuration_info)
 
+        rr_list = sorted(zip(*labeled_data['expertLabels'])[0])
         for pos in labeled_data['poslist']:
             feature_vector = feature_extractor.frompos(pos)
             training_data.append((feature_vector, 'fwave'))
+            
+            # Current R-R
+            left_r_index = bisect.bisect_left(rr_list, pos)
+            right_r_index = left_r_index + 1
+            if right_r_index >= len(rr_list):
+                print 'Warning: labeled fwave pos not in-between R-R!'
+            else:
+                max_rr = max(max_rr, abs(rr_list[left_r_index] - rr_list[right_r_index]))
+            
+            
+            
+            
 
     # Add normal training samples
     for ind in xrange(0, 20):
@@ -63,6 +80,9 @@ def train_test(fs = 500):
             next_qrs_pos = results[qrs_index + 1]
             normal_pos = (qrs_pos + next_qrs_pos) / 2.0
 
+            # Get max R-R length
+            max_rr = max(max_rr, abs(next_qrs_pos - qrs_pos))
+
             feature_vector = feature_extractor.frompos(normal_pos)
             training_data.append((feature_vector, 'normal'))
     
@@ -71,15 +91,23 @@ def train_test(fs = 500):
             max_depth = 30
             )
     X, y = zip(*training_data)
+
+    print 'Fitting model ...'
     model.fit(X, y)
 
+    print 'Maximum R-R interval is %d' % max_rr
     return model
 
 
 
+def longest_RR():
+    '''Get longest RR interval.'''
+    train_test()
+    
 if __name__ == '__main__':
-    import joblib 
-    with open('./models/fwave.mdl', 'wb') as fout:
-        joblib.dump(train_test(), fout)
-        print 'File written to %s' % './models/fwave.mdl'
+    longest_RR()
+    # import joblib 
+    # with open('./models/fwave.mdl', 'wb') as fout:
+        # joblib.dump(train_test(), fout)
+        # print 'File written to %s' % './models/fwave.mdl'
     
